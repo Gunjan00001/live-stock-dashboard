@@ -1,0 +1,1 @@
+export function StateMessage({ title, detail, tone = "neutral" }: { title: string; detail?: string; tone?: "neutral" | "error" | "closed" }) { return <div className={`state-message ${tone}`} role="status"><strong>{title}</strong>{detail ? <span>{detail}</span> : null}</div>; }
