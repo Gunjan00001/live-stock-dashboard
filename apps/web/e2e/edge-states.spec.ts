@@ -29,3 +29,17 @@ test("renders a visually distinct offline state", async ({ page }) => {
   await page.context().setOffline(true);
   await expect(page.getByRole("banner").getByText("Backend offline")).toBeVisible({ timeout: 3000 });
 });
+
+test("dark mode toggle switches and persists across reload", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Switch to dark mode" }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+});
+
+test("renders a full article page", async ({ page }) => {
+  await page.goto("/articles/why-investing-matters");
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("Why investing matters");
+  await expect(page.locator(".article-disclaimer")).toContainText("Educational content only");
+});
