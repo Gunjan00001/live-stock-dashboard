@@ -88,3 +88,40 @@ market hours.
 If you already created a Vercel project with Root Directory `apps/backend`, change
 it to `apps/web` (or delete it and create a new project). The backend must not be
 deployed to Vercel.
+
+### Live market data (Angel One SmartAPI)
+
+By default the backend uses an in-memory mock provider. Set
+`MARKET_DATA_PROVIDER=angelone` to stream real NSE/BSE data via Angel One
+SmartAPI WebSocket 2.0. All Angel One settings are **server-side only** — never
+give them a `NEXT_PUBLIC_` prefix.
+
+Required environment variables (set on Render):
+
+- `MARKET_DATA_PROVIDER=angelone`
+- `ANGELONE_API_KEY` — SmartAPI API key
+- `ANGELONE_CLIENT_CODE`
+- `ANGELONE_PASSWORD` — account MPIN
+- `ANGELONE_TOTP_SECRET` — base32 TOTP secret (from the authenticator QR code)
+- `ANGELONE_MAC_ADDRESS` — `X-MACAddress`
+- `ANGELONE_CLIENT_LOCAL_IP` — `X-ClientLocalIP`
+- `ANGELONE_CLIENT_PUBLIC_IP` — `X-ClientPublicIP`
+
+Optional: `ANGELONE_BASE_URL`, `ANGELONE_WEBSOCKET_URL`, `ANGELONE_SUBSCRIPTION_MODE`
+(1 LTP / 2 QUOTE / 3 SNAP_QUOTE; default 2).
+
+Static egress IP requirement: Angel One validates the request source IP against
+the app's configured IP. Render's default outbound IPs are shared CIDR ranges and
+cannot be allowlisted as a single address. To use the live feed you must either
+add Render Dedicated IPs (Pro workspace) and allowlist all three, or route
+outbound traffic through a static-IP proxy. `ANGELONE_CLIENT_PUBLIC_IP` must match
+the actual egress IP.
+
+Instrument tokens are generated from Angel One's official instrument master:
+
+```bash
+node apps/backend/scripts/resolve-angelone-tokens.mjs
+```
+
+This writes `apps/backend/src/angelone/instruments.generated.ts`. Re-run it when
+tokens change.
