@@ -24,7 +24,7 @@ export async function createApp(provider: PriceProvider = new MockPriceProvider(
   const eventBus = dependencies.eventBus ?? new InMemoryEventBus();
   const clients = new Map<WebSocket, Set<string>>();
   app.register(cors, { origin: true });
-  app.register(websocket);
+  await app.register(websocket);
   app.get("/api/quote/:symbol", async (request, reply) => { const symbol = (request.params as { symbol: string }).symbol.toUpperCase(); try { const quote = await quoteStore.get(symbol) ?? await provider.getQuote(symbol); await quoteStore.set(symbol, quote); return quote; } catch (error) { logError("provider", "Quote request failed", { symbol, endpoint: "/api/quote" }, error); return reply.code(404).send({ error: "Symbol not found" }); } });
   app.get("/api/historical/:symbol", async (request, reply) => { const params = request.params as { symbol: string }; const range = ((request.query as { range?: string }).range ?? "1D") as HistoricalRange; if (!["1D", "1W", "1M", "1Y"].includes(range)) return reply.code(400).send({ error: "Invalid range" }); try { return await provider.getHistorical(params.symbol, range); } catch (error) { logError("provider", "Historical request failed", { symbol: params.symbol.toUpperCase(), range, endpoint: "/api/historical" }, error); return reply.code(404).send({ error: "Symbol not found" }); } });
   app.get("/api/search", async (request) => searchInstruments((request.query as { q?: string }).q ?? ""));
