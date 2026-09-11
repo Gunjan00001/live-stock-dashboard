@@ -8,8 +8,6 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: "4000"
       - key: REDIS_ENABLED
         value: "false"
       - key: POSTGRES_ENABLED
