@@ -9,4 +9,20 @@ describe("backend configuration", () => {
   it("rejects the market-open override in production", () => {
     expect(() => loadConfig({ NODE_ENV: "production", FORCE_MARKET_OPEN: "true" })).toThrow("FORCE_MARKET_OPEN is not allowed in production");
   });
+
+  it("selects the angelone provider and requires its settings when enabled", () => {
+    const config = loadConfig({ MARKET_DATA_PROVIDER: "angelone", ANGELONE_API_KEY: "k", ANGELONE_CLIENT_CODE: "c", ANGELONE_PASSWORD: "p", ANGELONE_TOTP_SECRET: "s", ANGELONE_MAC_ADDRESS: "m", ANGELONE_CLIENT_LOCAL_IP: "1.1.1.1", ANGELONE_CLIENT_PUBLIC_IP: "2.2.2.2" });
+    expect(config.marketDataProvider).toBe("angelone");
+    expect(config.angelone).toMatchObject({ apiKey: "k", clientCode: "c", subscriptionMode: 2, websocketUrl: "wss://smartapisocket.angelone.in/smart-stream" });
+  });
+
+  it("throws when angelone is selected without credentials", () => {
+    expect(() => loadConfig({ MARKET_DATA_PROVIDER: "angelone" })).toThrow(/ANGELONE_/);
+  });
+
+  it("defaults to the mock provider", () => {
+    const config = loadConfig({ NODE_ENV: "test" });
+    expect(config.marketDataProvider).toBe("mock");
+    expect(config.angelone).toBeUndefined();
+  });
 });

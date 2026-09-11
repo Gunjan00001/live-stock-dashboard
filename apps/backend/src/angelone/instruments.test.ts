@@ -9,7 +9,7 @@ describe("angel instruments", () => {
 
   it("applies overrides", () => {
     const resolved = resolveAngelInstruments({ TCS: { token: "999" } });
-    expect(resolved.TCS.token).toBe("999");
+    expect(resolved.TCS!.token).toBe("999");
     expect(resolved.RELIANCE!.token).toBe(angelInstruments.RELIANCE!.token);
   });
 
