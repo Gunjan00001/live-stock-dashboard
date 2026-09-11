@@ -96,26 +96,23 @@ By default the backend uses an in-memory mock provider. Set
 SmartAPI WebSocket 2.0. All Angel One settings are **server-side only** — never
 give them a `NEXT_PUBLIC_` prefix.
 
-Required environment variables (set on Render):
+Required environment variables when `MARKET_DATA_PROVIDER=angelone` (set on Render):
 
 - `MARKET_DATA_PROVIDER=angelone`
 - `ANGELONE_API_KEY` — SmartAPI API key
 - `ANGELONE_CLIENT_CODE`
 - `ANGELONE_PASSWORD` — account MPIN
 - `ANGELONE_TOTP_SECRET` — base32 TOTP secret (from the authenticator QR code)
-- `ANGELONE_MAC_ADDRESS` — `X-MACAddress`
-- `ANGELONE_CLIENT_LOCAL_IP` — `X-ClientLocalIP`
-- `ANGELONE_CLIENT_PUBLIC_IP` — `X-ClientPublicIP`
+
+Optional login headers: `ANGELONE_MAC_ADDRESS`, `ANGELONE_CLIENT_LOCAL_IP`,
+`ANGELONE_CLIENT_PUBLIC_IP`. Per Angel One's official guidance, a whitelisted
+static IP is mandatory **only for Order and GTT APIs**; login, REST market data,
+and the WebSocket feed work without one, so no static IP or proxy is needed for
+this integration. These headers default to placeholder values and only need real
+values if your Angel One app requires them.
 
 Optional: `ANGELONE_BASE_URL`, `ANGELONE_WEBSOCKET_URL`, `ANGELONE_SUBSCRIPTION_MODE`
 (1 LTP / 2 QUOTE / 3 SNAP_QUOTE; default 2).
-
-Static egress IP requirement: Angel One validates the request source IP against
-the app's configured IP. Render's default outbound IPs are shared CIDR ranges and
-cannot be allowlisted as a single address. To use the live feed you must either
-add Render Dedicated IPs (Pro workspace) and allowlist all three, or route
-outbound traffic through a static-IP proxy. `ANGELONE_CLIENT_PUBLIC_IP` must match
-the actual egress IP.
 
 Instrument tokens are generated from Angel One's official instrument master:
 

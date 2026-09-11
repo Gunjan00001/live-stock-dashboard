@@ -43,11 +43,11 @@ Required when `MARKET_DATA_PROVIDER=angelone`:
 | `ANGELONE_CLIENT_CODE` | Angel One client code. |
 | `ANGELONE_PASSWORD` | Account MPIN/PIN (sent as `password`). |
 | `ANGELONE_TOTP_SECRET` | Base32 TOTP secret (from the TOTP QR), used to generate the 6-digit code. |
-| `ANGELONE_MAC_ADDRESS` | `X-MACAddress`. |
-| `ANGELONE_CLIENT_LOCAL_IP` | `X-ClientLocalIP`. |
-| `ANGELONE_CLIENT_PUBLIC_IP` | `X-ClientPublicIP`; must equal the backend's real egress IP. |
 
-Optional with defaults: `ANGELONE_BASE_URL` (`https://apiconnect.angelone.in`),
+Optional with defaults: `ANGELONE_MAC_ADDRESS` (`X-MACAddress`),
+`ANGELONE_CLIENT_LOCAL_IP` (`X-ClientLocalIP`), `ANGELONE_CLIENT_PUBLIC_IP`
+(`X-ClientPublicIP`) — placeholder defaults, only needed if the Angel One app
+requires them; `ANGELONE_BASE_URL` (`https://apiconnect.angelone.in`),
 `ANGELONE_WEBSOCKET_URL` (`wss://smartapisocket.angelone.in/smart-stream`),
 `ANGELONE_SUBSCRIPTION_MODE` (`2` = QUOTE).
 
@@ -116,20 +116,17 @@ same message shape.
   otherwise `MockPriceProvider` (test/local fallback).
 - `app.ts`, `shared-types`, and the web app are unchanged.
 
-## Render egress IP prerequisite (X-ClientPublicIP)
+## Static-IP requirement (verified)
 
-Angel One enforces a per-API-key source-IP allowlist (portal-configured); a
-mismatched egress IP returns "Request Rejected". Render's default outbound IPs
-are shared CIDR ranges, not a single static IP, so they cannot be reliably
-allowlisted.
+Angel One's official guidance: a whitelisted static IP is mandatory **only for
+Order and GTT APIs** (SEBI algorithmic-trading rules). For APIs other than Orders
+& GTT, a static IP is not mandatory. This integration uses login, REST market
+data, and the WebSocket feed only — no order/GTT APIs — so no static IP, Render
+Dedicated IP, or proxy is required.
 
-Supported approaches (deployment-side, not code):
-
-1. Render Dedicated IPs (Pro workspace) — allowlist all three static IPs.
-2. Static-IP proxy (e.g. QuotaGuard) for outbound REST/WS.
-
-`ANGELONE_CLIENT_LOCAL_IP` and `ANGELONE_MAC_ADDRESS` are not strictly validated
-and may be set explicitly or derived at runtime. All three are server-side config.
+`ANGELONE_CLIENT_LOCAL_IP`, `ANGELONE_CLIENT_PUBLIC_IP`, and `ANGELONE_MAC_ADDRESS`
+remain supported as optional server-side header overrides with placeholder
+defaults; they are only needed if an Angel One app specifically requires them.
 
 ## Security
 

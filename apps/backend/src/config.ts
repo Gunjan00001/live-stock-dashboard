@@ -63,9 +63,9 @@ export function loadConfig(env = process.env): BackendConfig {
     clientCode: required("ANGELONE_CLIENT_CODE", env.ANGELONE_CLIENT_CODE, provider),
     password: required("ANGELONE_PASSWORD", env.ANGELONE_PASSWORD, provider),
     totpSecret: required("ANGELONE_TOTP_SECRET", env.ANGELONE_TOTP_SECRET, provider),
-    macAddress: required("ANGELONE_MAC_ADDRESS", env.ANGELONE_MAC_ADDRESS, provider),
-    clientLocalIp: required("ANGELONE_CLIENT_LOCAL_IP", env.ANGELONE_CLIENT_LOCAL_IP, provider),
-    clientPublicIp: required("ANGELONE_CLIENT_PUBLIC_IP", env.ANGELONE_CLIENT_PUBLIC_IP, provider),
+    macAddress: env.ANGELONE_MAC_ADDRESS ?? "00:00:00:00:00:00",
+    clientLocalIp: env.ANGELONE_CLIENT_LOCAL_IP ?? "127.0.0.1",
+    clientPublicIp: env.ANGELONE_CLIENT_PUBLIC_IP ?? "127.0.0.1",
     baseUrl: env.ANGELONE_BASE_URL ?? "https://apiconnect.angelone.in",
     websocketUrl: env.ANGELONE_WEBSOCKET_URL ?? "wss://smartapisocket.angelone.in/smart-stream",
     subscriptionMode: subscriptionMode(env.ANGELONE_SUBSCRIPTION_MODE)

@@ -467,7 +467,7 @@ git commit -m "feat(angelone): select provider from configuration"
 **Files:**
 - Modify: `README.md`
 
-- [ ] **Step 1: Document env vars + the Render static-IP prerequisite** (from the spec: `ANGELONE_CLIENT_PUBLIC_IP` must match an allowlisted egress IP; Render Dedicated IPs or a static-IP proxy).
+- [ ] **Step 1: Document env vars and note that a static IP is not required for market data** (Angel One mandates it only for Order/GTT APIs; the login, REST market data, and WebSocket paths work without one).
 
 - [ ] **Step 2: Full verification**
 

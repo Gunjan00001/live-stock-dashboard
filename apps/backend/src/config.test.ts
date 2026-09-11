@@ -20,6 +20,11 @@ describe("backend configuration", () => {
     expect(() => loadConfig({ MARKET_DATA_PROVIDER: "angelone" })).toThrow(/ANGELONE_/);
   });
 
+  it("does not require static-IP headers for market data", () => {
+    const config = loadConfig({ MARKET_DATA_PROVIDER: "angelone", ANGELONE_API_KEY: "k", ANGELONE_CLIENT_CODE: "c", ANGELONE_PASSWORD: "p", ANGELONE_TOTP_SECRET: "s" });
+    expect(config.angelone).toMatchObject({ macAddress: "00:00:00:00:00:00", clientLocalIp: "127.0.0.1", clientPublicIp: "127.0.0.1" });
+  });
+
   it("defaults to the mock provider", () => {
     const config = loadConfig({ NODE_ENV: "test" });
     expect(config.marketDataProvider).toBe("mock");
