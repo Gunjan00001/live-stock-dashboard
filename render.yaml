@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: live-stock-dashboard-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/market-status
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "4000"
+      - key: REDIS_ENABLED
+        value: "false"
+      - key: POSTGRES_ENABLED
+        value: "false"
