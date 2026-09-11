@@ -1,5 +1,29 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Tick } from "@market-watch/shared-types";
 import { mapCandleRows, mapQuoteResponse, mapSmartTick, SmartAPIPriceProvider, type SmartApiQuoteResponse } from "./smart-api-provider.js";
+
+class FakeSocket {
+  readyState = 0;
+  sent: string[] = [];
+  private handlers: Record<string, ((...args: any[]) => void)[]> = {};
+  on(event: string, handler: (...args: any[]) => void) { (this.handlers[event] ??= []).push(handler); return this; }
+  send(data: string) { this.sent.push(data); }
+  close() { this.emit("close"); }
+  emit(event: string, ...args: any[]) { (this.handlers[event] ?? []).forEach((handler) => handler(...args)); }
+  open() { this.readyState = 1; this.emit("open"); }
+  drop() { this.emit("close"); }
+  message(data: Buffer) { this.emit("message", data); }
+}
+
+const wsConfig = { apiKey: "api-key", clientCode: "client", jwtToken: "jwt", feedToken: "feed", subscriptionMode: 2 as const };
+const okHttp = { request: async () => ({ status: true, message: "SUCCESS", data: { jwtToken: "jwt", feedToken: "feed" } }) as any };
+
+function quoteBinary(token: string, ltpPaise: number, volume: number) {
+  const buffer = Buffer.alloc(123);
+  buffer.writeUInt8(2, 0); buffer.writeUInt8(1, 1); buffer.write(token, 2, "ascii");
+  buffer.writeBigInt64LE(1_700_000_000_000n, 35); buffer.writeBigInt64LE(BigInt(ltpPaise), 43); buffer.writeBigInt64LE(BigInt(volume), 67);
+  return buffer;
+}
 
 describe("SmartAPI response mapping", () => {
   it("maps the documented fetched quote fields", () => {
@@ -24,5 +48,67 @@ describe("SmartAPI response mapping", () => {
     await provider.getQuote("TCS");
     expect(calls[0]).toMatchObject({ url: "https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote", headers: { Authorization: "Bearer jwt", "X-PrivateKey": "api-key" } });
     expect(JSON.parse(calls[0]!.body)).toEqual({ mode: "FULL", exchangeTokens: { NSE: ["11536"] } });
+  });
+});
+
+describe("SmartAPIPriceProvider streaming", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("subscribes with mode 2 and resubscribes after a drop", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const provider = new SmartAPIPriceProvider(wsConfig, okHttp, () => { const socket = new FakeSocket(); sockets.push(socket); return socket; });
+    const close = provider.subscribeTicks(["TCS"], () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.open();
+    expect(JSON.parse(sockets[0]!.sent[0]!)).toMatchObject({ action: 1, params: { mode: 2, tokenList: [{ exchangeType: 1, tokens: ["11536"] }] } });
+    sockets[0]!.drop();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.open();
+    expect(sockets[1]!.sent.some((message) => message.includes("11536"))).toBe(true);
+    close();
+  });
+
+  it("normalizes a binary QUOTE frame onto the catalog symbol", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const provider = new SmartAPIPriceProvider(wsConfig, okHttp, () => { const socket = new FakeSocket(); sockets.push(socket); return socket; });
+    const ticks: Tick[] = [];
+    const close = provider.subscribeTicks(["TCS"], (tick) => ticks.push(tick));
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.open();
+    sockets[0]!.message(quoteBinary("11536", 380_050, 1200));
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]).toMatchObject({ symbol: "TCS", exchange: "NSE", price: 3800.5, volume: 1200 });
+    close();
+  });
+
+  it("retries instead of throwing when authentication fails", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const failing = { request: async () => ({ status: false, message: "Invalid totp" }) as any };
+    const provider = new SmartAPIPriceProvider({ apiKey: "k", clientCode: "c", password: "p", totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" }, failing, () => { const socket = new FakeSocket(); sockets.push(socket); return socket; });
+    const close = provider.subscribeTicks(["TCS"], () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sockets).toHaveLength(0);
+    close();
+  });
+
+  it("caps the reconnect delay at maxMs", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const provider = new SmartAPIPriceProvider(wsConfig, okHttp, () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, { backoffBaseMs: 120000, backoffMaxMs: 60000 });
+    const close = provider.subscribeTicks(["TCS"], () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.drop();
+    await vi.advanceTimersByTimeAsync(59999);
+    expect(sockets).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sockets).toHaveLength(2);
+    close();
   });
 });
