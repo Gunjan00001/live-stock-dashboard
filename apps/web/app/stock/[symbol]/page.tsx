@@ -42,9 +42,9 @@ function StockDetail({ symbol }: { symbol: string }) {
         setTick(next);
         setQuote((current) => current ? { ...current, ...next, change: next.price - current.previousClose, changePercent: (next.price - current.previousClose) / current.previousClose * 100 } : current);
       }
-    }, () => setOffline(true));
+    }, () => setOffline(true), () => setOffline(false));
     live.subscribe([symbol]);
-    return () => live.socket.close();
+    return () => live.close();
   }, [symbol]);
 
   if (quoteError) return <main className="page"><Link className="back" href="/"><IconArrowBack />Back to market</Link><StateMessage tone="error" title="Instrument unavailable" detail={`We could not load ${symbol}. Check the symbol and try again.`} /></main>;

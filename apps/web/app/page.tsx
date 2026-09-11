@@ -33,9 +33,9 @@ export default function Home() {
     Promise.all([Promise.all(symbols.map(api.quote)), api.status()]).then(([values, status]) => {
       if (active) { setQuotes(values); setMarketClosed(!status.open); setNextOpen(status.nextOpen); }
     }).catch(() => setOffline(true));
-    const live = openMarketSocket((tick) => setQuotes((current) => current.map((quote) => quote.symbol === tick.symbol ? { ...quote, ...tick, change: tick.price - quote.previousClose, changePercent: (tick.price - quote.previousClose) / quote.previousClose * 100, dayHigh: Math.max(quote.dayHigh, tick.price), dayLow: Math.min(quote.dayLow, tick.price) } : quote)), () => setOffline(true));
+    const live = openMarketSocket((tick) => setQuotes((current) => current.map((quote) => quote.symbol === tick.symbol ? { ...quote, ...tick, change: tick.price - quote.previousClose, changePercent: (tick.price - quote.previousClose) / quote.previousClose * 100, dayHigh: Math.max(quote.dayHigh, tick.price), dayLow: Math.min(quote.dayLow, tick.price) } : quote)), () => setOffline(true), () => setOffline(false));
     live.subscribe(symbols);
-    return () => { active = false; live.socket.close(); };
+    return () => { active = false; live.close(); };
   }, []);
 
   useEffect(() => {
