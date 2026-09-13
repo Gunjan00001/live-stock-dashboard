@@ -311,6 +311,11 @@ tbody tr:hover td { background: var(--color-mist); }
 .search-result:hover strong { color: var(--color-accent-text); }
 .search-result small { display: block; color: var(--color-slate); font-weight: var(--font-weight-light); margin-top: 3px; font-size: 12px; }
 .search-arrow { color: var(--color-accent-text); font-size: 20px; font-weight: var(--font-weight-light); }
+.search-result a { flex: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: inherit; }
+.search-add { flex: none; cursor: pointer; border: 1px solid var(--color-rule); background: #fff; color: var(--color-accent-text); border-radius: 8px; padding: 6px 14px; font: inherit; font-size: 13px; }
+.search-add:hover { background: var(--color-mist); }
+.watch-remove { cursor: pointer; border: 0; background: transparent; color: #d34b56; font-size: 18px; line-height: 1; padding: 4px 8px; border-radius: 6px; }
+.watch-remove:hover { background: var(--color-mist); }
 
 /* ---------- Theme toggle ---------- */
 .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: var(--radius-pill); border: 2px solid var(--color-border-strong); background: transparent; color: var(--color-midnight-ink); cursor: pointer; transition: background 180ms ease, border-color 180ms ease, color 180ms ease; }

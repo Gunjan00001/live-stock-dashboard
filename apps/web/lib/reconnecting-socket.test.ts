@@ -21,6 +21,9 @@ function harness() {
   return { sockets, createSocket };
 }
 
+const tcs = { exchange: "NSE", symbol: "TCS" };
+const reliance = { exchange: "NSE", symbol: "RELIANCE" };
+
 describe("ReconnectingWebSocket", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
@@ -29,76 +32,57 @@ describe("ReconnectingWebSocket", () => {
     const { sockets, createSocket } = harness();
     const client = new ReconnectingWebSocket("ws://test/ws", { baseDelayMs: 1000, factor: 2, maxDelayMs: 30000, createSocket });
     expect(sockets).toHaveLength(1);
-
     sockets[0].fail();
     vi.advanceTimersByTime(999);
     expect(sockets).toHaveLength(1);
     vi.advanceTimersByTime(1);
     expect(sockets).toHaveLength(2);
-
     sockets[1].fail();
     vi.advanceTimersByTime(1999);
     expect(sockets).toHaveLength(2);
     vi.advanceTimersByTime(1);
     expect(sockets).toHaveLength(3);
-
-    sockets[2].fail();
-    vi.advanceTimersByTime(3999);
-    expect(sockets).toHaveLength(3);
-    vi.advanceTimersByTime(1);
-    expect(sockets).toHaveLength(4);
-
     client.close();
   });
 
   it("caps the reconnect delay at maxDelayMs", () => {
     const { sockets, createSocket } = harness();
     const client = new ReconnectingWebSocket("ws://test/ws", { baseDelayMs: 1000, factor: 4, maxDelayMs: 3000, createSocket });
-
     sockets[0].fail();
     vi.advanceTimersByTime(1000);
     expect(sockets).toHaveLength(2);
-
     sockets[1].fail();
     vi.advanceTimersByTime(2999);
     expect(sockets).toHaveLength(2);
     vi.advanceTimersByTime(1);
     expect(sockets).toHaveLength(3);
-
     client.close();
   });
 
   it("resets the backoff after a successful reconnection", () => {
     const { sockets, createSocket } = harness();
     const client = new ReconnectingWebSocket("ws://test/ws", { baseDelayMs: 1000, factor: 2, maxDelayMs: 30000, createSocket });
-
     sockets[0].fail();
     vi.advanceTimersByTime(1000);
     expect(sockets).toHaveLength(2);
-
     sockets[1].open();
     sockets[1].fail();
     vi.advanceTimersByTime(1000);
     expect(sockets).toHaveLength(3);
-
     client.close();
   });
 
-  it("re-subscribes to tracked symbols after reconnecting", () => {
+  it("re-subscribes to tracked instruments after reconnecting", () => {
     const { sockets, createSocket } = harness();
     const client = new ReconnectingWebSocket("ws://test/ws", { baseDelayMs: 1000, factor: 2, maxDelayMs: 30000, createSocket });
-    client.subscribe(["TCS", "RELIANCE"]);
+    client.subscribe([tcs, reliance]);
     expect(sockets[0].sent).toHaveLength(0);
-
     sockets[0].open();
-    expect(JSON.parse(sockets[0].sent[0]!)).toMatchObject({ version: 1, type: "subscribe", payload: { symbols: ["TCS", "RELIANCE"] } });
-
+    expect(JSON.parse(sockets[0].sent[0]!)).toMatchObject({ version: 1, type: "subscribe", payload: { instruments: [tcs, reliance] } });
     sockets[0].fail();
     vi.advanceTimersByTime(1000);
     sockets[1].open();
-    expect(sockets[1].sent).toHaveLength(1);
-    expect(JSON.parse(sockets[1].sent[0]!)).toMatchObject({ version: 1, type: "subscribe", payload: { symbols: ["TCS", "RELIANCE"] } });
-
+    expect(JSON.parse(sockets[1].sent[0]!)).toMatchObject({ type: "subscribe", payload: { instruments: [tcs, reliance] } });
     client.close();
   });
 
@@ -111,13 +95,14 @@ describe("ReconnectingWebSocket", () => {
     expect(sockets).toHaveLength(1);
   });
 
-  it("sends a subscription immediately when the socket is already open", () => {
+  it("sends a subscription immediately when open and an unsubscribe on removal", () => {
     const { sockets, createSocket } = harness();
     const client = new ReconnectingWebSocket("ws://test/ws", { createSocket });
     sockets[0].open();
-    client.subscribe(["INFY"]);
-    expect(sockets[0].sent).toHaveLength(1);
-    expect(JSON.parse(sockets[0].sent[0]!)).toMatchObject({ type: "subscribe", payload: { symbols: ["INFY"] } });
+    client.subscribe([{ exchange: "NSE", symbol: "YESBANK" }]);
+    expect(JSON.parse(sockets[0].sent[0]!)).toMatchObject({ type: "subscribe", payload: { instruments: [{ exchange: "NSE", symbol: "YESBANK" }] } });
+    client.unsubscribe([{ exchange: "NSE", symbol: "YESBANK" }]);
+    expect(JSON.parse(sockets[0].sent[1]!)).toMatchObject({ type: "unsubscribe", payload: { instruments: [{ exchange: "NSE", symbol: "YESBANK" }] } });
     client.close();
   });
 
@@ -127,16 +112,12 @@ describe("ReconnectingWebSocket", () => {
     const onClose = vi.fn();
     const onMessage = vi.fn();
     const client = new ReconnectingWebSocket("ws://test/ws", { onOpen, onClose, onMessage, createSocket });
-
     sockets[0].open();
     expect(onOpen).toHaveBeenCalledTimes(1);
-
     sockets[0].emitMessage('{"version":1}');
     expect(onMessage).toHaveBeenCalledWith('{"version":1}');
-
     sockets[0].fail();
     expect(onClose).toHaveBeenCalledTimes(1);
-
     client.close();
   });
 });

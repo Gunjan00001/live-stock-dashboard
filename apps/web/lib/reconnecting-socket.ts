@@ -1,3 +1,8 @@
+export interface SocketInstrument {
+  exchange: string;
+  symbol: string;
+}
+
 export interface SocketLike {
   readyState: number;
   send(data: string): void;
@@ -22,6 +27,8 @@ export interface ReconnectOptions {
 
 const OPEN = 1;
 
+function keyOf(instrument: SocketInstrument) { return `${instrument.exchange}:${instrument.symbol.toUpperCase()}`; }
+
 function defaultCreateSocket(url: string): SocketLike {
   return new WebSocket(url) as unknown as SocketLike;
 }
@@ -29,7 +36,7 @@ function defaultCreateSocket(url: string): SocketLike {
 export class ReconnectingWebSocket {
   private readonly url: string;
   private readonly options: ReconnectOptions;
-  private readonly subscriptions = new Set<string>();
+  private readonly subscriptions = new Map<string, SocketInstrument>();
   private attempt = 0;
   private socket?: SocketLike;
   private timer?: ReturnType<typeof setTimeout>;
@@ -41,9 +48,16 @@ export class ReconnectingWebSocket {
     this.connect();
   }
 
-  subscribe(symbols: string[]) {
-    for (const symbol of symbols) this.subscriptions.add(symbol);
+  subscribe(instruments: SocketInstrument[]) {
+    for (const instrument of instruments) this.subscriptions.set(keyOf(instrument), instrument);
     this.flushSubscriptions();
+  }
+
+  unsubscribe(instruments: SocketInstrument[]) {
+    for (const instrument of instruments) this.subscriptions.delete(keyOf(instrument));
+    const socket = this.socket;
+    if (!socket || socket.readyState !== OPEN || instruments.length === 0) return;
+    socket.send(JSON.stringify({ version: 1, type: "unsubscribe", payload: { instruments } }));
   }
 
   close() {
@@ -82,7 +96,7 @@ export class ReconnectingWebSocket {
   private flushSubscriptions() {
     const socket = this.socket;
     if (!socket || socket.readyState !== OPEN || this.subscriptions.size === 0) return;
-    socket.send(JSON.stringify({ version: 1, type: "subscribe", payload: { symbols: [...this.subscriptions] } }));
+    socket.send(JSON.stringify({ version: 1, type: "subscribe", payload: { instruments: [...this.subscriptions.values()] } }));
   }
 
   private scheduleReconnect() {

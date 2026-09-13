@@ -2,8 +2,10 @@
 
 import Link from "next/link";
 import { use, useEffect, useState } from "react";
-import type { Candle, MarketStatus, Quote, Tick } from "@market-watch/shared-types";
+import { useSearchParams } from "next/navigation";
+import type { Candle, Exchange, MarketStatus, Quote, Tick } from "@market-watch/shared-types";
 import { api, openMarketSocket } from "../../../lib/api";
+import { parseExchange } from "../../../lib/instrument-key";
 import { StockChart } from "../../../components/StockChart";
 import { StateMessage } from "../../../components/StateMessage";
 import { TopBar } from "../../../components/TopBar";
@@ -12,10 +14,12 @@ import { formatVolume } from "../../../lib/format";
 
 export default function StockPage({ params }: { params: Promise<{ symbol: string }> }) {
   const { symbol: rawSymbol } = use(params);
-  return <StockDetail symbol={rawSymbol.toUpperCase()} />;
+  const searchParams = useSearchParams();
+  const exchange = parseExchange(searchParams.get("exchange"));
+  return <StockDetail symbol={rawSymbol.toUpperCase()} exchange={exchange} />;
 }
 
-function StockDetail({ symbol }: { symbol: string }) {
+function StockDetail({ symbol, exchange }: { symbol: string; exchange?: Exchange }) {
   const [quote, setQuote] = useState<Quote>();
   const [candles, setCandles] = useState<Candle[]>([]);
   const [range, setRange] = useState("1D");
@@ -29,23 +33,23 @@ function StockDetail({ symbol }: { symbol: string }) {
     let active = true;
     setQuoteError(false);
     setHistoricalError(false);
-    Promise.all([api.quote(symbol), api.status()]).then(([nextQuote, status]) => {
+    Promise.all([api.quote(symbol, exchange), api.status()]).then(([nextQuote, status]) => {
       if (active) { setQuote(nextQuote); setMarketStatus(status); }
     }).catch(() => { if (active) setQuoteError(true); });
-    api.historical(symbol, range).then((nextCandles) => { if (active) setCandles(nextCandles); }).catch(() => { if (active) setHistoricalError(true); });
+    api.historical(symbol, range, exchange).then((nextCandles) => { if (active) setCandles(nextCandles); }).catch(() => { if (active) setHistoricalError(true); });
     return () => { active = false; };
-  }, [symbol, range]);
+  }, [symbol, range, exchange]);
 
   useEffect(() => {
     const live = openMarketSocket((next) => {
-      if (next.symbol === symbol) {
+      if (next.symbol === symbol && (!exchange || next.exchange === exchange)) {
         setTick(next);
-        setQuote((current) => current ? { ...current, ...next, change: next.price - current.previousClose, changePercent: (next.price - current.previousClose) / current.previousClose * 100 } : current);
+        setQuote((current) => current ? { ...current, price: next.price, timestamp: next.timestamp, volume: next.volume, change: next.price - current.previousClose, changePercent: (next.price - current.previousClose) / current.previousClose * 100 } : current);
       }
     }, () => setOffline(true), () => setOffline(false));
-    live.subscribe([symbol]);
+    live.subscribe([{ exchange: exchange ?? "NSE", symbol }]);
     return () => live.close();
-  }, [symbol]);
+  }, [symbol, exchange]);
 
   if (quoteError) return <main className="page"><Link className="back" href="/"><IconArrowBack />Back to market</Link><StateMessage tone="error" title="Instrument unavailable" detail={`We could not load ${symbol}. Check the symbol and try again.`} /></main>;
   if (!quote) return <main className="page"><Link className="back" href="/"><IconArrowBack />Back to market</Link><p>Loading stock data...</p></main>;
