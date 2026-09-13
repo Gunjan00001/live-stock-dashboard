@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Tick } from "@market-watch/shared-types";
 import { MockPriceProvider } from "./provider.js";
 
 describe("mock price provider", () => {
@@ -24,5 +25,31 @@ describe("mock price provider", () => {
     const close = new Date("2026-08-06T09:50:00.000Z");
     expect(first.generateTick("TCS", open).price).toBe(second.generateTick("TCS", open).price);
     expect(first.generateTick("TCS", open).volume).toBeLessThan(first.generateTick("TCS", close).volume);
+  });
+
+  afterEach(() => vi.useRealTimers());
+
+  it("adds and removes dynamic instruments without duplicates", () => {
+    vi.useFakeTimers();
+    const provider = new MockPriceProvider();
+    const ticks: Tick[] = [];
+    const stop = provider.subscribeTicks(["TCS"], (tick) => ticks.push(tick));
+    const yesBank = { exchange: "NSE" as const, exchangeType: 1, token: "11915", symbol: "YESBANK" };
+
+    vi.advanceTimersByTime(1500);
+    expect(ticks.some((tick) => tick.symbol === "TCS")).toBe(true);
+
+    ticks.length = 0;
+    provider.subscribe(yesBank);
+    provider.subscribe(yesBank);
+    vi.advanceTimersByTime(1500);
+    expect(ticks.filter((tick) => tick.symbol === "YESBANK" && tick.exchange === "NSE")).toHaveLength(1);
+
+    ticks.length = 0;
+    provider.unsubscribe(yesBank);
+    vi.advanceTimersByTime(1500);
+    expect(ticks.some((tick) => tick.symbol === "YESBANK")).toBe(false);
+    expect(ticks.some((tick) => tick.symbol === "TCS")).toBe(true);
+    stop();
   });
 });
