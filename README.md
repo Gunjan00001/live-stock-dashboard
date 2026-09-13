@@ -122,3 +122,41 @@ node apps/backend/scripts/resolve-angelone-tokens.mjs
 
 This writes `apps/backend/src/angelone/instruments.generated.ts`. Re-run it when
 tokens change.
+
+### Equity search universe
+
+The stock search universe is defined as **NSE/BSE listed cash-market equities
+that have a corresponding Angel One market-data token**. It is generated from
+authoritative sources — NSE `EQUITY_L.csv` and the BSE `ListofScripData`
+(`segment=Equity`, `Status=Active`) endpoint — joined to the Angel One
+instrument master for tokens. No heuristics are used to classify BSE equities,
+and derivatives, options, futures, debt, ETFs, and indices are excluded.
+
+To regenerate the snapshot:
+
+```bash
+corepack pnpm --filter @market-watch/backend sync:instruments
+```
+
+This writes `apps/backend/src/instruments/instruments.generated.ts` and prints a
+sync report: NSE/BSE source counts, included counts, equities **omitted because
+they have no Angel One token**, and the snapshot size. Re-run it when listings
+change.
+
+### Search and dynamic watchlist
+
+- `GET /api/instruments/search?q=&limit=` searches the local index by trading
+  symbol or company name (case-insensitive, punctuation-insensitive, partial
+  match) and returns NSE and BSE results separately with their exact tokens.
+  `/api/search` remains as a legacy alias.
+- `GET /api/quote/:symbol?exchange=` and `GET /api/historical/:symbol?range=&exchange=`
+  accept an optional exchange (default: default-watchlist exchange, else NSE).
+- The WebSocket accepts `{ instruments: [{ exchange, symbol }] }` in
+  subscribe/unsubscribe (the legacy `{ symbols: [...] }` form still works).
+  Subscriptions are per client and reference-counted: an instrument is
+  subscribed to Angel One only while at least one client watches it, and the 9
+  default instruments stay subscribed. Removing a watch never affects other
+  clients. Ticks carry `exchange` + `symbol`, so NSE and BSE listings are never
+  confused.
+- The frontend keeps the 9 default instruments and persists user-added watches in
+  `localStorage`.
