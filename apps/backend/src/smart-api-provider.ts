@@ -5,7 +5,7 @@ import { generateTotp } from "./angelone/totp.js";
 import { parseStreamFrame } from "./angelone/stream-parser.js";
 import { resolveAngelInstruments, tokenToSymbol, type AngelInstrument } from "./angelone/instruments.js";
 import type { PriceProvider } from "./provider.js";
-import { logError } from "./logger.js";
+import { logError, logInfo } from "./logger.js";
 
 export interface SmartApiConfig {
   apiKey: string;
@@ -70,6 +70,21 @@ const defaultSocketFactory: SmartSocketFactory = (url, options) => new WebSocket
 
 function isoSmartDate(date: Date) { return date.toISOString().replace("T", " ").slice(0, 16); }
 
+const TOKEN_REFRESH_MARGIN_MS = 60_000;
+
+function nextIstMidnightUtc(now: number): number {
+  const ist = new Date(now + 19_800_000);
+  return Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate(), 18, 30, 0);
+}
+
+function isAuthError(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const record = value as { errorcode?: unknown; message?: unknown };
+  if (record.errorcode === "AG8002" || record.errorcode === "AG8003") return true;
+  const message = typeof record.message === "string" ? record.message : "";
+  return /token expired|invalid token|session expired|http 401/i.test(message);
+}
+
 export function mapQuoteResponse(symbol: string, response: SmartApiQuoteResponse): Quote {
   const value = response.data?.fetched?.[0];
   if (!response.status || !value) throw new Error(response.message || "SmartAPI quote unavailable");
@@ -84,6 +99,8 @@ export function mapSmartTick(symbol: string, exchange: "NSE" | "BSE", value: { e
 export class SmartAPIPriceProvider implements PriceProvider {
   private jwtToken?: string;
   private feedToken?: string;
+  private tokenExpiresAt?: number;
+  private readonly now: () => number;
   private readonly baseUrl: string;
   private readonly websocketUrl: string;
   private readonly subscriptionMode: 1 | 2 | 3;
@@ -92,32 +109,58 @@ export class SmartAPIPriceProvider implements PriceProvider {
   private readonly options: ProviderOptions;
 
   constructor(private readonly config: SmartApiConfig, private readonly http: HttpClient = defaultHttp, private readonly socketFactory: SmartSocketFactory = defaultSocketFactory, options: ProviderOptions = {}) {
+    this.options = options;
+    this.now = options.now ?? Date.now;
     this.baseUrl = config.baseUrl ?? "https://apiconnect.angelone.in";
     this.websocketUrl = config.websocketUrl ?? "wss://smartapisocket.angelone.in/smart-stream";
     this.subscriptionMode = config.subscriptionMode ?? 2;
     this.jwtToken = config.jwtToken;
     this.feedToken = config.feedToken;
+    if (this.jwtToken && this.feedToken) this.tokenExpiresAt = nextIstMidnightUtc(this.now());
     const overrides = Object.fromEntries(Object.entries(config.symbolTokens ?? {}).map(([symbol, token]) => [symbol, { token }]));
     this.instruments = resolveAngelInstruments(overrides);
     this.reverseTokens = tokenToSymbol(this.instruments);
-    this.options = options;
   }
 
   private authHeaders(): Record<string, string> {
     return { "Content-Type": "application/json", Accept: "application/json", "X-UserType": "USER", "X-SourceID": "WEB", "X-ClientLocalIP": this.config.clientLocalIp ?? "", "X-ClientPublicIP": this.config.clientPublicIp ?? "", "X-MACAddress": this.config.macAddress ?? "", "X-PrivateKey": this.config.apiKey };
   }
 
-  private async authenticate() {
-    if (this.jwtToken && this.feedToken) return;
+  private hasFreshTokens(): boolean {
+    return Boolean(this.jwtToken && this.feedToken && this.tokenExpiresAt !== undefined && this.now() < this.tokenExpiresAt - TOKEN_REFRESH_MARGIN_MS);
+  }
+
+  private invalidateTokens() {
+    this.jwtToken = undefined;
+    this.feedToken = undefined;
+    this.tokenExpiresAt = undefined;
+  }
+
+  private async authenticate(force = false) {
+    if (!force && this.hasFreshTokens()) return;
     if (!this.config.password || !this.config.totpSecret) throw new Error("SmartAPI requires jwt/feed tokens or password and TOTP configuration");
-    const totp = generateTotp(this.config.totpSecret, (this.options.now ?? Date.now)());
+    this.invalidateTokens();
+    const totp = generateTotp(this.config.totpSecret, this.now());
     const response = await this.http.request<SmartApiLoginResponse>(`${this.baseUrl}/rest/auth/angelbroking/user/v1/loginByPassword`, { method: "POST", headers: this.authHeaders(), body: JSON.stringify({ clientcode: this.config.clientCode, password: this.config.password, totp }) });
     if (!response.status || !response.data) throw new Error(response.message || "SmartAPI authentication failed");
     this.jwtToken = response.data.jwtToken;
     this.feedToken = response.data.feedToken;
+    this.tokenExpiresAt = nextIstMidnightUtc(this.now());
+    logInfo("provider", "SmartAPI authenticated", { provider: "SmartAPI" });
   }
 
-  private async request<T>(path: string, body: unknown) { try { await this.authenticate(); return await this.http.request<T>(`${this.baseUrl}${path}`, { method: "POST", headers: { ...this.authHeaders(), Authorization: `Bearer ${this.jwtToken}` }, body: JSON.stringify(body) }); } catch (error) { logError("provider", "SmartAPI request failed", { provider: "SmartAPI", path }, error); throw error; } }
+  private async request<T>(path: string, body: unknown, retry = true): Promise<T> {
+    try {
+      await this.authenticate();
+      const response = await this.http.request<T>(`${this.baseUrl}${path}`, { method: "POST", headers: { ...this.authHeaders(), Authorization: `Bearer ${this.jwtToken}` }, body: JSON.stringify(body) });
+      if (retry && isAuthError(response)) { this.invalidateTokens(); return this.request<T>(path, body, false); }
+      return response;
+    } catch (error) {
+      if (retry && isAuthError(error)) { this.invalidateTokens(); return this.request<T>(path, body, false); }
+      logError("provider", "SmartAPI request failed", { provider: "SmartAPI", path }, error);
+      throw error;
+    }
+  }
 
   private instrumentFor(symbol: string) {
     const instrument = findInstrument(symbol);
@@ -138,9 +181,10 @@ export class SmartAPIPriceProvider implements PriceProvider {
       if (!instrument) continue;
       groups.set(instrument.exchangeType, [...(groups.get(instrument.exchangeType) ?? []), instrument.token]);
     }
-    if (groups.size === 0) return;
+    if (groups.size === 0) return 0;
     const tokenList = [...groups].map(([exchangeType, tokens]) => ({ exchangeType, tokens }));
     socket.send(JSON.stringify({ correlationID: "market-watch", action: 1, params: { mode: this.subscriptionMode, tokenList } }));
+    return tokenList.reduce((total, group) => total + group.tokens.length, 0);
   }
 
   subscribeTicks(symbols: string[], onTick: (tick: Tick) => void) {
@@ -170,6 +214,7 @@ export class SmartAPIPriceProvider implements PriceProvider {
         if (closed) return;
         const active = provider.socketFactory(provider.websocketUrl, { headers: { Authorization: `Bearer ${provider.jwtToken}`, "x-api-key": provider.config.apiKey, "x-client-code": provider.config.clientCode, "x-feed-token": provider.feedToken ?? "" } });
         socket = active;
+        let firstTick = false;
         const drop = () => {
           if (active !== socket) return;
           socket = undefined;
@@ -179,7 +224,9 @@ export class SmartAPIPriceProvider implements PriceProvider {
         active.on("open", () => {
           if (closed || active !== socket) return;
           attempt = 0;
-          provider.sendSubscriptions(active, symbols);
+          firstTick = false;
+          const tokens = provider.sendSubscriptions(active, symbols);
+          logInfo("websocket", "SmartAPI stream connected", { provider: "SmartAPI", tokens });
           clearHeartbeat();
           heartbeat = startHeartbeat(() => active.send("ping"), heartbeatMs);
         });
@@ -190,11 +237,12 @@ export class SmartAPIPriceProvider implements PriceProvider {
           const symbol = provider.reverseTokens[frame.token];
           const instrument = symbol ? provider.instruments[symbol] : undefined;
           if (!symbol || !instrument) return;
+          if (!firstTick) { firstTick = true; logInfo("provider", "SmartAPI first tick", { provider: "SmartAPI", symbol }); }
           onTick({ symbol, exchange: instrument.exchange, timestamp: new Date(frame.timestamp).toISOString(), price: frame.price, volume: frame.volume });
         });
         active.on("error", (error: unknown) => { logError("websocket", "SmartAPI WebSocket error", { provider: "SmartAPI" }, error); drop(); });
-        active.on("close", drop);
-      }).catch((error) => { logError("websocket", "SmartAPI WebSocket authentication failed", { provider: "SmartAPI" }, error); scheduleReconnect(); });
+        active.on("close", (code?: number, reason?: Buffer | string) => { logInfo("websocket", "SmartAPI stream closed", { provider: "SmartAPI", code: typeof code === "number" ? code : undefined, reason: reason ? reason.toString() : undefined }); drop(); });
+      }).catch((error) => { provider.invalidateTokens(); logError("websocket", "SmartAPI WebSocket authentication failed", { provider: "SmartAPI" }, error); scheduleReconnect(); });
     }
     const provider = this;
     connect();

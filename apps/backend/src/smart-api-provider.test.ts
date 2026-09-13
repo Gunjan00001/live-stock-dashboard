@@ -52,7 +52,7 @@ describe("SmartAPI response mapping", () => {
 });
 
 describe("SmartAPIPriceProvider streaming", () => {
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
   it("subscribes with mode 2 and resubscribes after a drop", async () => {
     vi.useFakeTimers();
@@ -109,6 +109,92 @@ describe("SmartAPIPriceProvider streaming", () => {
     expect(sockets).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(sockets).toHaveLength(2);
+    close();
+  });
+});
+
+describe("SmartAPIPriceProvider token lifecycle and telemetry", () => {
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it("re-authenticates after the session expires at midnight IST", async () => {
+    let currentTime = Date.UTC(2026, 8, 13, 10, 0, 0);
+    const calls: string[] = [];
+    const http = { request: async (url: string) => {
+      calls.push(url);
+      if (url.includes("loginByPassword")) return { status: true, message: "SUCCESS", data: { jwtToken: "jwt", feedToken: "feed" } } as any;
+      return { status: true, message: "SUCCESS", data: { fetched: [{ exchange: "NSE", tradingSymbol: "TCS-EQ", symbolToken: "11536", ltp: 3800, open: 3790, high: 3810, low: 3780, close: 3795, tradeVolume: 10 }] } } as any;
+    }};
+    const provider = new SmartAPIPriceProvider({ apiKey: "k", clientCode: "c", password: "p", totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" }, http, undefined, { now: () => currentTime });
+    const logins = () => calls.filter((url) => url.includes("loginByPassword")).length;
+    await provider.getQuote("TCS");
+    await provider.getQuote("TCS");
+    expect(logins()).toBe(1);
+    currentTime = Date.UTC(2026, 8, 13, 19, 0, 0);
+    await provider.getQuote("TCS");
+    expect(logins()).toBe(2);
+  });
+
+  it("re-authenticates and retries when a token is rejected", async () => {
+    let quoteCalls = 0;
+    const http = { request: async (url: string) => {
+      if (url.includes("loginByPassword")) return { status: true, message: "SUCCESS", data: { jwtToken: "jwt", feedToken: "feed" } } as any;
+      quoteCalls += 1;
+      if (quoteCalls === 1) return { status: false, errorcode: "AG8002", message: "Token Expired" } as any;
+      return { status: true, message: "SUCCESS", data: { fetched: [{ exchange: "NSE", tradingSymbol: "TCS-EQ", symbolToken: "11536", ltp: 3800, open: 3790, high: 3810, low: 3780, close: 3795, tradeVolume: 10 }] } } as any;
+    }};
+    const provider = new SmartAPIPriceProvider({ apiKey: "k", clientCode: "c", password: "p", totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" }, http);
+    const quote = await provider.getQuote("TCS");
+    expect(quote.price).toBe(3800);
+    expect(quoteCalls).toBe(2);
+  });
+
+  it("clears tokens and re-authenticates after a WebSocket authentication failure", async () => {
+    vi.useFakeTimers();
+    let failAuth = true;
+    const logins: string[] = [];
+    const http = { request: async (url: string) => {
+      if (url.includes("loginByPassword")) { logins.push(url); if (failAuth) throw new Error("SmartAPI HTTP 401"); return { status: true, message: "SUCCESS", data: { jwtToken: "jwt", feedToken: "feed" } } as any; }
+      return { status: true, message: "SUCCESS", data: {} } as any;
+    }};
+    const sockets: FakeSocket[] = [];
+    const provider = new SmartAPIPriceProvider({ apiKey: "k", clientCode: "c", password: "p", totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" }, http, () => { const socket = new FakeSocket(); sockets.push(socket); return socket; });
+    const close = provider.subscribeTicks(["TCS"], () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(logins).toHaveLength(1);
+    expect(sockets).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(logins).toHaveLength(2);
+    failAuth = false;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(logins).toHaveLength(3);
+    expect(sockets).toHaveLength(1);
+    close();
+  });
+
+  it("emits non-secret telemetry for auth, subscription and the first tick", async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const http = { request: async (url: string) => url.includes("loginByPassword")
+      ? { status: true, message: "SUCCESS", data: { jwtToken: "JWT-TOKEN-VALUE", feedToken: "FEED-TOKEN-VALUE" } } as any
+      : { status: true, message: "SUCCESS", data: {} } as any };
+    const sockets: FakeSocket[] = [];
+    const provider = new SmartAPIPriceProvider({ apiKey: "k", clientCode: "c", password: "MPIN-VALUE", totpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" }, http, () => { const socket = new FakeSocket(); sockets.push(socket); return socket; });
+    const close = provider.subscribeTicks(["TCS"], () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.open();
+    sockets[0]!.message(quoteBinary("11536", 380_050, 1200));
+    sockets[0]!.message(quoteBinary("11536", 380_100, 1300));
+    sockets[0]!.drop();
+    const lines = log.mock.calls.map((args) => String(args[0]));
+    expect(lines.some((line) => line.includes("SmartAPI authenticated"))).toBe(true);
+    expect(lines.some((line) => line.includes("SmartAPI stream connected") && line.includes('"tokens":1'))).toBe(true);
+    expect(lines.filter((line) => line.includes("SmartAPI first tick")).length).toBe(1);
+    expect(lines.some((line) => line.includes("SmartAPI stream closed"))).toBe(true);
+    const combined = lines.join("\n");
+    expect(combined).not.toContain("JWT-TOKEN-VALUE");
+    expect(combined).not.toContain("FEED-TOKEN-VALUE");
+    expect(combined).not.toContain("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+    expect(combined).not.toContain("MPIN-VALUE");
     close();
   });
 });
