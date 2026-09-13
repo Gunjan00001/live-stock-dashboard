@@ -111,6 +111,39 @@ describe("SmartAPIPriceProvider streaming", () => {
     expect(sockets).toHaveLength(2);
     close();
   });
+
+  it("sends dynamic subscribe and unsubscribe frames for a single token", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const provider = new SmartAPIPriceProvider(wsConfig, okHttp, () => { const socket = new FakeSocket(); sockets.push(socket); return socket; });
+    const close = provider.subscribeTicks(["TCS"], () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.open();
+    sockets[0]!.sent.length = 0;
+    provider.subscribe({ exchange: "NSE", exchangeType: 1, token: "11915", symbol: "YESBANK" });
+    expect(JSON.parse(sockets[0]!.sent[0]!)).toMatchObject({ action: 1, params: { mode: 2, tokenList: [{ exchangeType: 1, tokens: ["11915"] }] } });
+    sockets[0]!.sent.length = 0;
+    provider.unsubscribe({ exchange: "NSE", exchangeType: 1, token: "11915", symbol: "YESBANK" });
+    expect(JSON.parse(sockets[0]!.sent[0]!)).toMatchObject({ action: 0, params: { tokenList: [{ exchangeType: 1, tokens: ["11915"] }] } });
+    close();
+  });
+
+  it("re-subscribes default and dynamic instruments after reconnect", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const provider = new SmartAPIPriceProvider(wsConfig, okHttp, () => { const socket = new FakeSocket(); sockets.push(socket); return socket; });
+    const close = provider.subscribeTicks(["TCS"], () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.open();
+    provider.subscribe({ exchange: "NSE", exchangeType: 1, token: "11915", symbol: "YESBANK" });
+    sockets[0]!.drop();
+    await vi.advanceTimersByTimeAsync(1000);
+    sockets[1]!.open();
+    const sent = sockets[1]!.sent.join(" ");
+    expect(sent).toContain("11536");
+    expect(sent).toContain("11915");
+    close();
+  });
 });
 
 describe("SmartAPIPriceProvider token lifecycle and telemetry", () => {

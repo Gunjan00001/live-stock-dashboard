@@ -1,10 +1,10 @@
 import WebSocket from "ws";
-import type { Candle, HistoricalRange, Quote, Tick } from "@market-watch/shared-types";
-import { findInstrument } from "./catalog.js";
+import type { Candle, Exchange, HistoricalRange, Quote, Tick } from "@market-watch/shared-types";
 import { generateTotp } from "./angelone/totp.js";
 import { parseStreamFrame } from "./angelone/stream-parser.js";
-import { resolveAngelInstruments, tokenToSymbol, type AngelInstrument } from "./angelone/instruments.js";
-import type { PriceProvider } from "./provider.js";
+import { resolveAngelInstruments } from "./angelone/instruments.js";
+import { resolve as resolveEquity } from "./instruments/registry.js";
+import type { PriceProvider, ProviderInstrument } from "./provider.js";
 import { logError, logInfo } from "./logger.js";
 
 export interface SmartApiConfig {
@@ -28,6 +28,7 @@ export interface ProviderOptions {
   heartbeatMs?: number;
   backoffBaseMs?: number;
   backoffMaxMs?: number;
+  resolveInstrument?: (symbol: string, exchange?: Exchange) => ProviderInstrument | undefined;
   setTimeoutFn?: (handler: () => void, timeoutMs: number) => ReturnType<typeof setTimeout>;
   clearTimeoutFn?: (id: ReturnType<typeof setTimeout>) => void;
   setIntervalFn?: (handler: () => void, timeoutMs: number) => ReturnType<typeof setInterval>;
@@ -64,13 +65,13 @@ interface SmartSocket { on(event: string, handler: (...args: any[]) => void): Sm
 type SmartSocketFactory = (url: string, options: { headers: Record<string, string> }) => SmartSocket;
 
 const rangeDays: Record<HistoricalRange, number> = { "1D": 1, "1W": 7, "1M": 31, "1Y": 365 };
+const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
 const defaultHttp: HttpClient = { async request<T>(url: string, init: { method: string; headers: Record<string, string>; body?: string }) { const response = await fetch(url, init); if (!response.ok) throw new Error(`SmartAPI HTTP ${response.status}`); return response.json() as Promise<T>; } };
 const defaultSocketFactory: SmartSocketFactory = (url, options) => new WebSocket(url, options) as unknown as SmartSocket;
+const angelDefaults = resolveAngelInstruments();
 
 function isoSmartDate(date: Date) { return date.toISOString().replace("T", " ").slice(0, 16); }
-
-const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
 function nextIstMidnightUtc(now: number): number {
   const ist = new Date(now + 19_800_000);
@@ -83,6 +84,22 @@ function isAuthError(value: unknown): boolean {
   if (record.errorcode === "AG8002" || record.errorcode === "AG8003") return true;
   const message = typeof record.message === "string" ? record.message : "";
   return /token expired|invalid token|session expired|http 401/i.test(message);
+}
+
+function defaultResolve(symbol: string, exchange: Exchange | undefined, config: SmartApiConfig): ProviderInstrument | undefined {
+  const upper = symbol.toUpperCase();
+  const equity = resolveEquity(upper, exchange);
+  const known = angelDefaults[upper];
+  const override = config.symbolTokens?.[upper];
+  if (override) {
+    const exchangeName: Exchange = exchange ?? equity?.exchange ?? known?.exchange ?? "NSE";
+    const exchangeType = equity?.exchangeType ?? known?.exchangeType ?? (exchangeName === "NSE" ? 1 : 3);
+    return { exchange: exchangeName, exchangeType, token: override, symbol: upper };
+  }
+  if (equity) return { exchange: equity.exchange, exchangeType: equity.exchangeType, token: equity.token, symbol: equity.symbol };
+  if (!known) return undefined;
+  if (exchange && known.exchange !== exchange) return undefined;
+  return { exchange: known.exchange, exchangeType: known.exchangeType, token: known.token, symbol: upper };
 }
 
 export function mapQuoteResponse(symbol: string, response: SmartApiQuoteResponse): Quote {
@@ -104,22 +121,40 @@ export class SmartAPIPriceProvider implements PriceProvider {
   private readonly baseUrl: string;
   private readonly websocketUrl: string;
   private readonly subscriptionMode: 1 | 2 | 3;
-  private readonly instruments: Record<string, AngelInstrument>;
-  private readonly reverseTokens: Record<string, string>;
-  private readonly options: ProviderOptions;
+  private readonly resolveInstrument: (symbol: string, exchange?: Exchange) => ProviderInstrument | undefined;
+  private readonly scheduleTimer: (handler: () => void, timeoutMs: number) => ReturnType<typeof setTimeout>;
+  private readonly cancelTimer: (id: ReturnType<typeof setTimeout>) => void;
+  private readonly startHeartbeat: (handler: () => void, timeoutMs: number) => ReturnType<typeof setInterval>;
+  private readonly stopHeartbeat: (id: ReturnType<typeof setInterval>) => void;
+  private readonly heartbeatMs: number;
+  private readonly backoffBaseMs: number;
+  private readonly backoffMaxMs: number;
+  private readonly activeByKey = new Map<string, ProviderInstrument>();
+  private readonly activeByToken = new Map<string, ProviderInstrument>();
+  private tickHandler?: (tick: Tick) => void;
+  private socket?: SmartSocket;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private heartbeat?: ReturnType<typeof setInterval>;
+  private attempt = 0;
+  private stopped = true;
+  private connected = false;
 
   constructor(private readonly config: SmartApiConfig, private readonly http: HttpClient = defaultHttp, private readonly socketFactory: SmartSocketFactory = defaultSocketFactory, options: ProviderOptions = {}) {
-    this.options = options;
     this.now = options.now ?? Date.now;
     this.baseUrl = config.baseUrl ?? "https://apiconnect.angelone.in";
     this.websocketUrl = config.websocketUrl ?? "wss://smartapisocket.angelone.in/smart-stream";
     this.subscriptionMode = config.subscriptionMode ?? 2;
+    this.resolveInstrument = options.resolveInstrument ?? ((symbol, exchange) => defaultResolve(symbol, exchange, config));
+    this.scheduleTimer = options.setTimeoutFn ?? setTimeout;
+    this.cancelTimer = options.clearTimeoutFn ?? clearTimeout;
+    this.startHeartbeat = options.setIntervalFn ?? setInterval;
+    this.stopHeartbeat = options.clearIntervalFn ?? clearInterval;
+    this.heartbeatMs = options.heartbeatMs ?? 10000;
+    this.backoffBaseMs = options.backoffBaseMs ?? 1000;
+    this.backoffMaxMs = options.backoffMaxMs ?? 60000;
     this.jwtToken = config.jwtToken;
     this.feedToken = config.feedToken;
     if (this.jwtToken && this.feedToken) this.tokenExpiresAt = nextIstMidnightUtc(this.now());
-    const overrides = Object.fromEntries(Object.entries(config.symbolTokens ?? {}).map(([symbol, token]) => [symbol, { token }]));
-    this.instruments = resolveAngelInstruments(overrides);
-    this.reverseTokens = tokenToSymbol(this.instruments);
   }
 
   private authHeaders(): Record<string, string> {
@@ -162,90 +197,105 @@ export class SmartAPIPriceProvider implements PriceProvider {
     }
   }
 
-  private instrumentFor(symbol: string) {
-    const instrument = findInstrument(symbol);
+  private instrumentFor(symbol: string, exchange?: Exchange) {
+    const instrument = this.resolveInstrument(symbol, exchange);
     if (!instrument) throw new Error(`Unknown symbol: ${symbol}`);
-    const angel = this.instruments[instrument.symbol];
-    if (!angel) throw new Error(`Missing SmartAPI symbol token for ${symbol}`);
-    return { instrument, angel };
+    return instrument;
   }
 
-  async getQuote(symbol: string) { const { instrument, angel } = this.instrumentFor(symbol); const response = await this.request<SmartApiQuoteResponse>("/rest/secure/angelbroking/market/v1/quote", { mode: "FULL", exchangeTokens: { [instrument.exchange]: [angel.token] } }); return mapQuoteResponse(instrument.symbol, response); }
+  async getQuote(symbol: string, exchange?: Exchange) { const instrument = this.instrumentFor(symbol, exchange); const response = await this.request<SmartApiQuoteResponse>("/rest/secure/angelbroking/market/v1/quote", { mode: "FULL", exchangeTokens: { [instrument.exchange]: [instrument.token] } }); return mapQuoteResponse(symbol.toUpperCase(), response); }
 
-  async getHistorical(symbol: string, range: HistoricalRange) { const { instrument, angel } = this.instrumentFor(symbol); const to = new Date(); const from = new Date(to.getTime() - rangeDays[range] * 86400000); const interval = range === "1D" ? "ONE_MINUTE" : "ONE_DAY"; const response = await this.request<{ status: boolean; message: string; data?: unknown[][] }>("/rest/secure/angelbroking/historical/v1/getCandleData", { exchange: instrument.exchange, symboltoken: angel.token, interval, fromdate: isoSmartDate(from), todate: isoSmartDate(to) }); if (!response.status || !response.data) throw new Error(response.message || "SmartAPI historical data unavailable"); return mapCandleRows(response.data); }
+  async getHistorical(symbol: string, range: HistoricalRange, exchange?: Exchange) { const instrument = this.instrumentFor(symbol, exchange); const to = new Date(); const from = new Date(to.getTime() - rangeDays[range] * 86400000); const interval = range === "1D" ? "ONE_MINUTE" : "ONE_DAY"; const response = await this.request<{ status: boolean; message: string; data?: unknown[][] }>("/rest/secure/angelbroking/historical/v1/getCandleData", { exchange: instrument.exchange, symboltoken: instrument.token, interval, fromdate: isoSmartDate(from), todate: isoSmartDate(to) }); if (!response.status || !response.data) throw new Error(response.message || "SmartAPI historical data unavailable"); return mapCandleRows(response.data); }
 
-  private sendSubscriptions(socket: SmartSocket, symbols: string[]) {
+  private addActive(instrument: ProviderInstrument) {
+    const normalized: ProviderInstrument = { exchange: instrument.exchange, exchangeType: instrument.exchangeType, token: instrument.token, symbol: instrument.symbol.toUpperCase() };
+    this.activeByKey.set(`${normalized.exchange}:${normalized.symbol}`, normalized);
+    this.activeByToken.set(`${normalized.exchangeType}:${normalized.token}`, normalized);
+  }
+
+  private removeActive(instrument: ProviderInstrument) {
+    this.activeByKey.delete(`${instrument.exchange}:${instrument.symbol.toUpperCase()}`);
+    this.activeByToken.delete(`${instrument.exchangeType}:${instrument.token}`);
+  }
+
+  private sendSubscription(instrument: ProviderInstrument, action: number) {
+    if (!this.connected || !this.socket) return;
+    this.socket.send(JSON.stringify({ correlationID: "market-watch", action, params: { mode: this.subscriptionMode, tokenList: [{ exchangeType: instrument.exchangeType, tokens: [instrument.token] }] } }));
+  }
+
+  private sendAllSubscriptions(socket: SmartSocket): number {
     const groups = new Map<number, string[]>();
-    for (const symbol of symbols) {
-      const instrument = this.instruments[symbol.toUpperCase()];
-      if (!instrument) continue;
-      groups.set(instrument.exchangeType, [...(groups.get(instrument.exchangeType) ?? []), instrument.token]);
-    }
-    if (groups.size === 0) return 0;
+    for (const instrument of this.activeByKey.values()) groups.set(instrument.exchangeType, [...(groups.get(instrument.exchangeType) ?? []), instrument.token]);
     const tokenList = [...groups].map(([exchangeType, tokens]) => ({ exchangeType, tokens }));
+    if (!tokenList.length) return 0;
     socket.send(JSON.stringify({ correlationID: "market-watch", action: 1, params: { mode: this.subscriptionMode, tokenList } }));
     return tokenList.reduce((total, group) => total + group.tokens.length, 0);
   }
 
-  subscribeTicks(symbols: string[], onTick: (tick: Tick) => void) {
-    const schedule = this.options.setTimeoutFn ?? setTimeout;
-    const cancel = this.options.clearTimeoutFn ?? clearTimeout;
-    const startHeartbeat = this.options.setIntervalFn ?? setInterval;
-    const stopInterval = this.options.clearIntervalFn ?? clearInterval;
-    const heartbeatMs = this.options.heartbeatMs ?? 10000;
-    const baseMs = this.options.backoffBaseMs ?? 1000;
-    const maxMs = this.options.backoffMaxMs ?? 60000;
-    let closed = false;
-    let socket: SmartSocket | undefined;
-    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    let heartbeat: ReturnType<typeof setInterval> | undefined;
-    let attempt = 0;
+  subscribe(instrument: ProviderInstrument) { this.addActive(instrument); this.sendSubscription(instrument, 1); }
 
-    const clearHeartbeat = () => { if (heartbeat !== undefined) { stopInterval(heartbeat); heartbeat = undefined; } };
-    const scheduleReconnect = () => {
-      if (closed) return;
-      const delay = Math.min(maxMs, baseMs * 2 ** attempt);
-      attempt += 1;
-      reconnectTimer = schedule(connect, delay);
+  unsubscribe(instrument: ProviderInstrument) { this.removeActive(instrument); this.sendSubscription(instrument, 0); }
+
+  private clearHeartbeat() { if (this.heartbeat !== undefined) { this.stopHeartbeat(this.heartbeat); this.heartbeat = undefined; } }
+
+  private scheduleReconnect() {
+    if (this.stopped) return;
+    const delay = Math.min(this.backoffMaxMs, this.backoffBaseMs * 2 ** this.attempt);
+    this.attempt += 1;
+    this.reconnectTimer = this.scheduleTimer(() => { this.reconnectTimer = undefined; this.connect(); }, delay);
+  }
+
+  private connect() {
+    if (this.stopped) return;
+    void this.authenticate().then(() => {
+      if (this.stopped) return;
+      const active = this.socketFactory(this.websocketUrl, { headers: { Authorization: `Bearer ${this.jwtToken}`, "x-api-key": this.config.apiKey, "x-client-code": this.config.clientCode, "x-feed-token": this.feedToken ?? "" } });
+      this.socket = active;
+      let firstTick = false;
+      const drop = () => {
+        if (active !== this.socket) return;
+        this.socket = undefined;
+        this.connected = false;
+        this.clearHeartbeat();
+        this.scheduleReconnect();
+      };
+      active.on("open", () => {
+        if (this.stopped || active !== this.socket) return;
+        this.attempt = 0;
+        this.connected = true;
+        firstTick = false;
+        const tokens = this.sendAllSubscriptions(active);
+        logInfo("websocket", "SmartAPI stream connected", { provider: "SmartAPI", tokens });
+        this.clearHeartbeat();
+        this.heartbeat = this.startHeartbeat(() => active.send("ping"), this.heartbeatMs);
+      });
+      active.on("message", (data: Buffer | string) => {
+        if (typeof data === "string" || !Buffer.isBuffer(data)) return;
+        const frame = parseStreamFrame(data);
+        if (!frame) return;
+        const instrument = this.activeByToken.get(`${frame.exchangeType}:${frame.token}`);
+        if (!instrument) return;
+        if (!firstTick) { firstTick = true; logInfo("provider", "SmartAPI first tick", { provider: "SmartAPI", symbol: instrument.symbol }); }
+        this.tickHandler?.({ symbol: instrument.symbol, exchange: instrument.exchange, timestamp: new Date(frame.timestamp).toISOString(), price: frame.price, volume: frame.volume });
+      });
+      active.on("error", (error: unknown) => { logError("websocket", "SmartAPI WebSocket error", { provider: "SmartAPI" }, error); drop(); });
+      active.on("close", (code?: number, reason?: Buffer | string) => { logInfo("websocket", "SmartAPI stream closed", { provider: "SmartAPI", code: typeof code === "number" ? code : undefined, reason: reason ? reason.toString() : undefined }); drop(); });
+    }).catch((error) => { this.invalidateTokens(); logError("websocket", "SmartAPI WebSocket authentication failed", { provider: "SmartAPI" }, error); this.scheduleReconnect(); });
+  }
+
+  subscribeTicks(symbols: string[], onTick: (tick: Tick) => void) {
+    this.tickHandler = onTick;
+    for (const symbol of symbols) { const instrument = this.resolveInstrument(symbol); if (instrument) this.addActive(instrument); }
+    this.stopped = false;
+    this.connect();
+    return () => {
+      this.stopped = true;
+      this.connected = false;
+      if (this.reconnectTimer !== undefined) { this.cancelTimer(this.reconnectTimer); this.reconnectTimer = undefined; }
+      this.clearHeartbeat();
+      const socket = this.socket;
+      this.socket = undefined;
+      socket?.close();
     };
-    function connect() {
-      if (closed) return;
-      void provider.authenticate().then(() => {
-        if (closed) return;
-        const active = provider.socketFactory(provider.websocketUrl, { headers: { Authorization: `Bearer ${provider.jwtToken}`, "x-api-key": provider.config.apiKey, "x-client-code": provider.config.clientCode, "x-feed-token": provider.feedToken ?? "" } });
-        socket = active;
-        let firstTick = false;
-        const drop = () => {
-          if (active !== socket) return;
-          socket = undefined;
-          clearHeartbeat();
-          scheduleReconnect();
-        };
-        active.on("open", () => {
-          if (closed || active !== socket) return;
-          attempt = 0;
-          firstTick = false;
-          const tokens = provider.sendSubscriptions(active, symbols);
-          logInfo("websocket", "SmartAPI stream connected", { provider: "SmartAPI", tokens });
-          clearHeartbeat();
-          heartbeat = startHeartbeat(() => active.send("ping"), heartbeatMs);
-        });
-        active.on("message", (data: Buffer | string) => {
-          if (typeof data === "string" || !Buffer.isBuffer(data)) return;
-          const frame = parseStreamFrame(data);
-          if (!frame) return;
-          const symbol = provider.reverseTokens[frame.token];
-          const instrument = symbol ? provider.instruments[symbol] : undefined;
-          if (!symbol || !instrument) return;
-          if (!firstTick) { firstTick = true; logInfo("provider", "SmartAPI first tick", { provider: "SmartAPI", symbol }); }
-          onTick({ symbol, exchange: instrument.exchange, timestamp: new Date(frame.timestamp).toISOString(), price: frame.price, volume: frame.volume });
-        });
-        active.on("error", (error: unknown) => { logError("websocket", "SmartAPI WebSocket error", { provider: "SmartAPI" }, error); drop(); });
-        active.on("close", (code?: number, reason?: Buffer | string) => { logInfo("websocket", "SmartAPI stream closed", { provider: "SmartAPI", code: typeof code === "number" ? code : undefined, reason: reason ? reason.toString() : undefined }); drop(); });
-      }).catch((error) => { provider.invalidateTokens(); logError("websocket", "SmartAPI WebSocket authentication failed", { provider: "SmartAPI" }, error); scheduleReconnect(); });
-    }
-    const provider = this;
-    connect();
-    return () => { closed = true; if (reconnectTimer !== undefined) cancel(reconnectTimer); clearHeartbeat(); socket?.close(); };
   }
 }
