@@ -55,6 +55,27 @@ export interface MarketStatus {
 
 export interface SearchResult extends Instrument { }
 
+export interface InstrumentSearchResult {
+  exchange: Exchange;
+  exchangeType: number;
+  token: string;
+  symbol: string;
+  tradingSymbol: string;
+  name: string;
+  isin?: string;
+  type: "EQUITY";
+}
+
+export interface WsInstrument {
+  exchange: Exchange;
+  symbol: string;
+}
+
+export interface WsSubscriptionPayload {
+  symbols?: string[];
+  instruments?: WsInstrument[];
+}
+
 export interface WsMessage<TType extends string, TPayload> {
   version: 1;
   type: TType;
@@ -62,12 +83,12 @@ export interface WsMessage<TType extends string, TPayload> {
 }
 
 export type ClientWsMessage =
-  | WsMessage<"subscribe", { symbols: string[] }>
-  | WsMessage<"unsubscribe", { symbols: string[] }>;
+  | WsMessage<"subscribe", WsSubscriptionPayload>
+  | WsMessage<"unsubscribe", WsSubscriptionPayload>;
 
 export type ServerWsMessage =
   | WsMessage<"tick", { tick: Tick }>
-  | WsMessage<"subscribed", { symbols: string[] }>
-  | WsMessage<"unsubscribed", { symbols: string[] }>
+  | WsMessage<"subscribed", WsSubscriptionPayload>
+  | WsMessage<"unsubscribed", WsSubscriptionPayload>
   | WsMessage<"status", MarketStatus>
   | WsMessage<"error", { message: string }>;
